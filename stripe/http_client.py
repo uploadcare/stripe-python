@@ -22,6 +22,7 @@ except ImportError:
 
 try:
     import requests
+    requests_session = requests.session()
 except ImportError:
     requests = None
 else:
@@ -94,12 +95,12 @@ class RequestsClient(HTTPClient):
 
         try:
             try:
-                result = requests.request(method,
-                                          url,
-                                          headers=headers,
-                                          data=post_data,
-                                          timeout=80,
-                                          **kwargs)
+                result = requests_session.request(method,
+                                                  url,
+                                                  headers=headers,
+                                                  data=post_data,
+                                                  timeout=80,
+                                                  **kwargs)
             except TypeError, e:
                 raise TypeError(
                     'Warning: It looks like your installed version of the '
