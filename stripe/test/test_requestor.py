@@ -1,5 +1,5 @@
 import datetime
-import unittest
+import unittest2
 import urlparse
 
 from mock import Mock
@@ -137,12 +137,13 @@ class APIRequestorRequestTests(StripeUnitTestCase):
         self.requestor = stripe.api_requestor.APIRequestor(
             client=self.http_client)
 
-    def mock_response(self, return_body, return_code, requestor=None):
+    def mock_response(self, return_body, return_code, requestor=None,
+                      headers=None):
         if not requestor:
             requestor = self.requestor
 
         self.http_client.request = Mock(
-            return_value=(return_body, return_code))
+            return_value=(return_body, return_code, headers or {}))
 
     def check_call(self, meth, abs_url=None, headers=None,
                    post_data=None, requestor=None):
@@ -198,6 +199,20 @@ class APIRequestorRequestTests(StripeUnitTestCase):
             expectation.extend([(k % (type_,), str(v)) for k, v in values])
 
         self.check_call('get', QueryMatcher(expectation))
+
+    def test_dictionary_list_encoding(self):
+        params = {
+            'foo': {
+                '0': {
+                    'bar': 'bat',
+                }
+            }
+        }
+        encoded = list(stripe.api_requestor._api_encode(params))
+        key, value = encoded[0]
+
+        self.assertEqual('foo[0][bar]', key)
+        self.assertEqual('bat', value)
 
     def test_url_construction(self):
         CASES = (
@@ -262,6 +277,11 @@ class APIRequestorRequestTests(StripeUnitTestCase):
                     self.valid_path, encoded)
                 self.check_call(meth, abs_url=UrlMatcher(abs_url))
 
+    def test_uses_headers(self):
+        self.mock_response('{}', 200)
+        self.requestor.request('get', self.valid_path, {}, {'foo': 'bar'})
+        self.check_call('get', headers=APIHeaderMatcher(extra={'foo': 'bar'}))
+
     def test_uses_instance_key(self):
         key = 'fookey'
         requestor = stripe.api_requestor.APIRequestor(key,
@@ -284,6 +304,24 @@ class APIRequestorRequestTests(StripeUnitTestCase):
 
         self.check_call('get', headers=APIHeaderMatcher(
             extra={'Stripe-Version': 'fooversion'}, request_method='get'))
+
+    def test_uses_instance_account(self):
+        account = 'acct_foo'
+        requestor = stripe.api_requestor.APIRequestor(account=account,
+                                                      client=self.http_client)
+
+        self.mock_response('{}', 200, requestor=requestor)
+
+        requestor.request('get', self.valid_path, {})
+
+        self.check_call(
+            'get',
+            requestor=requestor,
+            headers=APIHeaderMatcher(
+                extra={'Stripe-Account': account},
+                request_method='get'
+            ),
+        )
 
     def test_fails_without_api_key(self):
         stripe.api_key = None
@@ -333,4 +371,4 @@ class APIRequestorRequestTests(StripeUnitTestCase):
                           'foo', 'bar')
 
 if __name__ == '__main__':
-    unittest.main()
+    unittest2.main()

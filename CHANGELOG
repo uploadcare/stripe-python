@@ -1,3 +1,43 @@
+=== 1.23.0 2015-07-06
+
+* Include response headers in exceptions.
+
+=== 1.22.3 2015-06-04
+
+* Fix saving `additional_owners` on managed accounts
+
+=== 1.22.2 2015-04-08
+
+* Fix saving manage accounts
+
+=== 1.22.1 2015-03-30
+
+* Pass `stripe_account` to Balance.retrieve
+
+=== 1.22.0 2015-03-22
+
+* Added methods for updating and saving arrays of objects
+
+=== 1.21.0 2015-02-19
+
+* Added Bitcoin Receiver update and delete methods
+
+=== 1.20.2 2015-01-21
+
+* Remove support for top-level bitcoin transactions
+
+=== 1.20.1 2015-01-07
+
+* Adding bitcoin receiver and transaction objects
+
+=== 1.20.0 2014-12-23
+
+* Adding support for file uploads resource
+
+=== 1.19.1 2014-10-23
+
+* Remove redundant manual SSL blacklist preflight check
+
 === 1.19.0 2014-07-26
 
 * Application Fee refunds now a list instead of array

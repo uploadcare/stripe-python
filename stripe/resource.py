@@ -2,20 +2,25 @@ import urllib
 import warnings
 import sys
 
-from stripe import api_requestor, error, util
+from stripe import api_requestor, error, util, upload_api_base
 
 
-def convert_to_stripe_object(resp, api_key):
-    types = {'charge': Charge, 'customer': Customer,
+def convert_to_stripe_object(resp, api_key, account):
+    types = {'account': Account, 'charge': Charge, 'customer': Customer,
              'invoice': Invoice, 'invoiceitem': InvoiceItem,
              'plan': Plan, 'coupon': Coupon, 'token': Token, 'event': Event,
              'transfer': Transfer, 'list': ListObject, 'recipient': Recipient,
+             'bank_account': BankAccount,
              'card': Card, 'application_fee': ApplicationFee,
              'subscription': Subscription, 'refund': Refund,
-             'fee_refund': ApplicationFeeRefund}
+             'file_upload': FileUpload,
+             'fee_refund': ApplicationFeeRefund,
+             'bitcoin_receiver': BitcoinReceiver,
+             'bitcoin_transaction': BitcoinTransaction,
+             'transfer_reversal': Reversal}
 
     if isinstance(resp, list):
-        return [convert_to_stripe_object(i, api_key) for i in resp]
+        return [convert_to_stripe_object(i, api_key, account) for i in resp]
     elif isinstance(resp, dict) and not isinstance(resp, StripeObject):
         resp = resp.copy()
         klass_name = resp.get('object')
@@ -23,25 +28,63 @@ def convert_to_stripe_object(resp, api_key):
             klass = types.get(klass_name, StripeObject)
         else:
             klass = StripeObject
-        return klass.construct_from(resp, api_key)
+        return klass.construct_from(resp, api_key, stripe_account=account)
     else:
         return resp
 
 
+def populate_headers(idempotency_key):
+    if idempotency_key is not None:
+        return {"Idempotency-Key": idempotency_key}
+    return None
+
+
+def _compute_diff(current, previous):
+    if isinstance(current, dict):
+        previous = previous or {}
+        diff = current.copy()
+        for key in set(previous.keys()) - set(diff.keys()):
+            diff[key] = ""
+        return diff
+    return current if current is not None else ""
+
+
+def _serialize_list(array, previous):
+    array = array or []
+    previous = previous or []
+    params = {}
+
+    for i, v in enumerate(array):
+        previous_item = previous[i] if len(previous) > i else None
+        if hasattr(v, 'serialize'):
+            params[str(i)] = v.serialize(previous_item)
+        else:
+            params[str(i)] = _compute_diff(v, previous_item)
+
+    return params
+
+
 class StripeObject(dict):
-    def __init__(self, id=None, api_key=None, **params):
+    def __init__(self, id=None, api_key=None, stripe_account=None, **params):
         super(StripeObject, self).__init__()
 
         self._unsaved_values = set()
         self._transient_values = set()
 
         self._retrieve_params = params
-        self._previous_metadata = None
+        self._previous = None
 
         object.__setattr__(self, 'api_key', api_key)
+        object.__setattr__(self, 'stripe_account', stripe_account)
 
         if id:
             self['id'] = id
+
+    def update(self, update_dict):
+        for k in update_dict:
+            self._unsaved_values.add(k)
+
+        return super(StripeObject, self).update(update_dict)
 
     def __setattr__(self, k, v):
         if k[0] == '_' or k in self.__dict__:
@@ -95,13 +138,18 @@ class StripeObject(dict):
             "To unset a property, set it to None.")
 
     @classmethod
-    def construct_from(cls, values, api_key):
-        instance = cls(values.get('id'), api_key)
-        instance.refresh_from(values, api_key)
+    def construct_from(cls, values, key, stripe_account=None):
+        instance = cls(values.get('id'), api_key=key,
+                       stripe_account=stripe_account)
+        instance.refresh_from(values, api_key=key,
+                              stripe_account=stripe_account)
         return instance
 
-    def refresh_from(self, values, api_key=None, partial=False):
+    def refresh_from(self, values, api_key=None, partial=False,
+                     stripe_account=None):
         self.api_key = api_key or getattr(values, 'api_key', None)
+        self.stripe_account = \
+            stripe_account or getattr(values, 'stripe_account', None)
 
         # Wipe old state before setting new.  This is useful for e.g.
         # updating a customer, where there is no persistent card
@@ -112,25 +160,29 @@ class StripeObject(dict):
             removed = set(self.keys()) - set(values)
             self._transient_values = self._transient_values | removed
             self._unsaved_values = set()
-
             self.clear()
 
         self._transient_values = self._transient_values - set(values)
 
         for k, v in values.iteritems():
             super(StripeObject, self).__setitem__(
-                k, convert_to_stripe_object(v, api_key))
+                k, convert_to_stripe_object(v, api_key, stripe_account))
 
-        self._previous_metadata = values.get('metadata')
+        self._previous = values
 
-    def request(self, method, url, params=None):
+    @classmethod
+    def api_base(cls):
+        return None
+
+    def request(self, method, url, params=None, headers=None):
         if params is None:
             params = self._retrieve_params
+        requestor = api_requestor.APIRequestor(
+            key=self.api_key, api_base=self.api_base(),
+            account=self.stripe_account)
+        response, api_key = requestor.request(method, url, params, headers)
 
-        requestor = api_requestor.APIRequestor(self.api_key)
-        response, api_key = requestor.request(method, url, params)
-
-        return convert_to_stripe_object(response, api_key)
+        return convert_to_stripe_object(response, api_key, self.stripe_account)
 
     def __repr__(self):
         ident_parts = [type(self).__name__]
@@ -164,6 +216,25 @@ class StripeObject(dict):
     @property
     def stripe_id(self):
         return self.id
+
+    def serialize(self, previous):
+        params = {}
+        unsaved_keys = self._unsaved_values or set()
+        previous = previous or self._previous or {}
+
+        for k, v in self.items():
+            if k == 'id' or (isinstance(k, str) and k.startswith('_')):
+                continue
+            elif isinstance(v, APIResource):
+                continue
+            elif hasattr(v, 'serialize'):
+                params[k] = v.serialize(previous.get(k, None))
+            elif k in unsaved_keys:
+                params[k] = _compute_diff(v, previous.get(k, None))
+            elif k == 'additional_owners' and v is not None:
+                params[k] = _serialize_list(v, previous.get(k, None))
+
+        return params
 
 
 class StripeObjectEncoder(util.json.JSONEncoder):
@@ -220,8 +291,9 @@ class ListObject(StripeObject):
     def all(self, **params):
         return self.request('get', self['url'], params)
 
-    def create(self, **params):
-        return self.request('post', self['url'], params)
+    def create(self, idempotency_key=None, **params):
+        headers = populate_headers(idempotency_key)
+        return self.request('post', self['url'], params, headers)
 
     def retrieve(self, id, **params):
         base = self.get('url')
@@ -235,9 +307,8 @@ class ListObject(StripeObject):
 class SingletonAPIResource(APIResource):
 
     @classmethod
-    def retrieve(cls, api_key=None):
-        return super(SingletonAPIResource, cls).retrieve(None,
-                                                         api_key=api_key)
+    def retrieve(cls, **params):
+        return super(SingletonAPIResource, cls).retrieve(None, **params)
 
     @classmethod
     def class_url(cls):
@@ -254,62 +325,38 @@ class SingletonAPIResource(APIResource):
 class ListableAPIResource(APIResource):
 
     @classmethod
-    def all(cls, api_key=None, **params):
-        requestor = api_requestor.APIRequestor(api_key)
+    def all(cls, api_key=None, idempotency_key=None,
+            stripe_account=None, **params):
+        requestor = api_requestor.APIRequestor(api_key, account=stripe_account)
         url = cls.class_url()
         response, api_key = requestor.request('get', url, params)
-        return convert_to_stripe_object(response, api_key)
+        return convert_to_stripe_object(response, api_key, stripe_account)
 
 
 class CreateableAPIResource(APIResource):
 
     @classmethod
-    def create(cls, api_key=None, **params):
-        requestor = api_requestor.APIRequestor(api_key)
+    def create(cls, api_key=None, idempotency_key=None,
+               stripe_account=None, **params):
+        requestor = api_requestor.APIRequestor(api_key, account=stripe_account)
         url = cls.class_url()
-        response, api_key = requestor.request('post', url, params)
-        return convert_to_stripe_object(response, api_key)
+        headers = populate_headers(idempotency_key)
+        response, api_key = requestor.request('post', url, params, headers)
+        return convert_to_stripe_object(response, api_key, stripe_account)
 
 
 class UpdateableAPIResource(APIResource):
 
-    def save(self):
-        updated_params = self.serialize(self)
-
-        if getattr(self, 'metadata', None):
-            updated_params['metadata'] = self.serialize_metadata()
+    def save(self, idempotency_key=None):
+        updated_params = self.serialize(None)
+        headers = populate_headers(idempotency_key)
 
         if updated_params:
             self.refresh_from(self.request('post', self.instance_url(),
-                                           updated_params))
+                                           updated_params, headers))
         else:
             util.logger.debug("Trying to save already saved object %r", self)
         return self
-
-    def serialize_metadata(self):
-        if 'metadata' in self._unsaved_values:
-            # the metadata object has been reassigned
-            # i.e. as object.metadata = {key: val}
-            metadata_update = self.metadata
-            previous = self._previous_metadata or {}
-            keys_to_unset = set(previous.keys()) - \
-                set(self.metadata.keys())
-            for key in keys_to_unset:
-                metadata_update[key] = ""
-
-            return metadata_update
-        else:
-            return self.serialize(self.metadata)
-
-    def serialize(self, obj):
-        params = {}
-        if obj._unsaved_values:
-            for k in obj._unsaved_values:
-                if k == 'id' or k == '_previous_metadata':
-                    continue
-                v = getattr(obj, k)
-                params[k] = v if v is not None else ""
-        return params
 
 
 class DeletableAPIResource(APIResource):
@@ -318,11 +365,24 @@ class DeletableAPIResource(APIResource):
         self.refresh_from(self.request('delete', self.instance_url(), params))
         return self
 
+
 # API objects
+class Account(CreateableAPIResource, ListableAPIResource,
+              UpdateableAPIResource):
+    @classmethod
+    def retrieve(cls, id=None, api_key=None, **params):
+        instance = cls(id, api_key, **params)
+        instance.refresh()
+        return instance
 
-
-class Account(SingletonAPIResource):
-    pass
+    def instance_url(self):
+        id = self.get('id')
+        if not id:
+            return "/v1/account"
+        id = util.utf8(id)
+        base = self.class_url()
+        extn = urllib.quote_plus(id)
+        return "%s/%s" % (base, extn)
 
 
 class Balance(SingletonAPIResource):
@@ -342,67 +402,136 @@ class Card(UpdateableAPIResource, DeletableAPIResource):
         self.id = util.utf8(self.id)
         extn = urllib.quote_plus(self.id)
         if (hasattr(self, 'customer')):
-            self.customer = util.utf8(self.customer)
+            customer = util.utf8(self.customer)
 
             base = Customer.class_url()
-            owner_extn = urllib.quote_plus(self.customer)
+            owner_extn = urllib.quote_plus(customer)
+            class_base = "sources"
 
         elif (hasattr(self, 'recipient')):
-            self.recipient = util.utf8(self.recipient)
+            recipient = util.utf8(self.recipient)
 
             base = Recipient.class_url()
-            owner_extn = urllib.quote_plus(self.recipient)
+            owner_extn = urllib.quote_plus(recipient)
+            class_base = "cards"
+
+        elif (hasattr(self, 'account')):
+            account = util.utf8(self.account)
+
+            base = Account.class_url()
+            owner_extn = urllib.quote_plus(account)
+            class_base = "external_accounts"
 
         else:
             raise error.InvalidRequestError(
                 "Could not determine whether card_id %s is "
-                "attached to a customer "
-                "or a recipient." % self.id, 'id')
+                "attached to a customer, recipient, or "
+                "account." % self.id, 'id')
 
-        return "%s/%s/cards/%s" % (base, owner_extn, extn)
+        return "%s/%s/%s/%s" % (base, owner_extn, class_base, extn)
 
     @classmethod
-    def retrieve(cls, id, api_key=None, **params):
+    def retrieve(cls, id, api_key=None, stripe_account=None, **params):
         raise NotImplementedError(
-            "Can't retrieve a card without a customer or recipient"
-            "ID. Use customer.cards.retrieve('card_id') or "
-            "recipient.cards.retrieve('card_id') instead.")
+            "Can't retrieve a card without a customer, recipient or account "
+            "ID. Use customer.sources.retrieve('card_id'), "
+            "recipient.cards.retrieve('card_id'), or "
+            "account.external_accounts.retrieve('card_id') instead.")
+
+
+class BankAccount(UpdateableAPIResource, DeletableAPIResource):
+
+    def instance_url(self):
+        self.id = util.utf8(self.id)
+        extn = urllib.quote_plus(self.id)
+        if (hasattr(self, 'customer')):
+            customer = util.utf8(self.customer)
+
+            base = Customer.class_url()
+            owner_extn = urllib.quote_plus(customer)
+            class_base = "sources"
+
+        elif (hasattr(self, 'account')):
+            account = util.utf8(self.account)
+
+            base = Account.class_url()
+            owner_extn = urllib.quote_plus(account)
+            class_base = "external_accounts"
+
+        else:
+            raise error.InvalidRequestError(
+                "Could not determine whether bank_account_id %s is "
+                "attached to a customer or an account." % self.id, 'id')
+
+        return "%s/%s/%s/%s" % (base, owner_extn, class_base, extn)
+
+    @classmethod
+    def retrieve(cls, id, api_key=None, stripe_account=None, **params):
+        raise NotImplementedError(
+            "Can't retrieve a bank account without a customer or account ID. "
+            "Use customer.sources.retrieve('bank_account_id') or "
+            "account.external_accounts.retrieve('bank_account_id') instead.")
 
 
 class Charge(CreateableAPIResource, ListableAPIResource,
              UpdateableAPIResource):
 
-    def refund(self, **params):
+    def refund(self, idempotency_key=None, **params):
         url = self.instance_url() + '/refund'
-        self.refresh_from(self.request('post', url, params))
+        headers = populate_headers(idempotency_key)
+        self.refresh_from(self.request('post', url, params, headers))
         return self
 
-    def capture(self, **params):
+    def capture(self, idempotency_key=None, **params):
         url = self.instance_url() + '/capture'
-        self.refresh_from(self.request('post', url, params))
+        headers = populate_headers(idempotency_key)
+        self.refresh_from(self.request('post', url, params, headers))
         return self
 
-    def update_dispute(self, **params):
-        requestor = api_requestor.APIRequestor(self.api_key)
+    def update_dispute(self, idempotency_key=None, **params):
+        requestor = api_requestor.APIRequestor(self.api_key,
+                                               account=self.stripe_account)
         url = self.instance_url() + '/dispute'
-        response, api_key = requestor.request('post', url, params)
+        headers = populate_headers(idempotency_key)
+        response, api_key = requestor.request('post', url, params, headers)
         self.refresh_from({'dispute': response}, api_key, True)
         return self.dispute
 
-    def close_dispute(self):
-        requestor = api_requestor.APIRequestor(self.api_key)
+    def close_dispute(self, idempotency_key=None):
+        requestor = api_requestor.APIRequestor(self.api_key,
+                                               account=self.stripe_account)
         url = self.instance_url() + '/dispute/close'
-        response, api_key = requestor.request('post', url, {})
+        headers = populate_headers(idempotency_key)
+        response, api_key = requestor.request('post', url, {}, headers)
         self.refresh_from({'dispute': response}, api_key, True)
         return self.dispute
+
+    def mark_as_fraudulent(self, idempotency_key=None):
+        params = {
+            'fraud_details': {'user_report': 'fraudulent'}
+        }
+        url = self.instance_url()
+        headers = populate_headers(idempotency_key)
+        self.refresh_from(self.request('post', url, params, headers))
+        return self
+
+    def mark_as_safe(self, idempotency_key=None):
+        params = {
+            'fraud_details': {'user_report': 'safe'}
+        }
+        url = self.instance_url()
+        headers = populate_headers(idempotency_key)
+        self.refresh_from(self.request('post', url, params, headers))
+        return self
 
 
 class Customer(CreateableAPIResource, UpdateableAPIResource,
                ListableAPIResource, DeletableAPIResource):
 
-    def add_invoice_item(self, **params):
+    def add_invoice_item(self, idempotency_key=None, **params):
         params['customer'] = self.id
-        ii = InvoiceItem.create(self.api_key, **params)
+        ii = InvoiceItem.create(self.api_key,
+                                idempotency_key=idempotency_key, **params)
         return ii
 
     def invoices(self, **params):
@@ -420,22 +549,27 @@ class Customer(CreateableAPIResource, UpdateableAPIResource,
         charges = Charge.all(self.api_key, **params)
         return charges
 
-    def update_subscription(self, **params):
-        requestor = api_requestor.APIRequestor(self.api_key)
+    def update_subscription(self, idempotency_key=None, **params):
+        requestor = api_requestor.APIRequestor(self.api_key,
+                                               account=self.stripe_account)
         url = self.instance_url() + '/subscription'
-        response, api_key = requestor.request('post', url, params)
+        headers = populate_headers(idempotency_key)
+        response, api_key = requestor.request('post', url, params, headers)
         self.refresh_from({'subscription': response}, api_key, True)
         return self.subscription
 
-    def cancel_subscription(self, **params):
-        requestor = api_requestor.APIRequestor(self.api_key)
+    def cancel_subscription(self, idempotency_key=None, **params):
+        requestor = api_requestor.APIRequestor(self.api_key,
+                                               account=self.stripe_account)
         url = self.instance_url() + '/subscription'
-        response, api_key = requestor.request('delete', url, params)
+        headers = populate_headers(idempotency_key)
+        response, api_key = requestor.request('delete', url, params, headers)
         self.refresh_from({'subscription': response}, api_key, True)
         return self.subscription
 
     def delete_discount(self, **params):
-        requestor = api_requestor.APIRequestor(self.api_key)
+        requestor = api_requestor.APIRequestor(self.api_key,
+                                               account=self.stripe_account)
         url = self.instance_url() + '/discount'
         _, api_key = requestor.request('delete', url)
         self.refresh_from({'discount': None}, api_key, True)
@@ -444,15 +578,17 @@ class Customer(CreateableAPIResource, UpdateableAPIResource,
 class Invoice(CreateableAPIResource, ListableAPIResource,
               UpdateableAPIResource):
 
-    def pay(self):
-        return self.request('post', self.instance_url() + '/pay', {})
+    def pay(self, idempotency_key=None):
+        headers = populate_headers(idempotency_key)
+        return self.request('post', self.instance_url() + '/pay', {}, headers)
 
     @classmethod
-    def upcoming(cls, api_key=None, **params):
-        requestor = api_requestor.APIRequestor(api_key)
+    def upcoming(cls, api_key=None, stripe_account=None, **params):
+        requestor = api_requestor.APIRequestor(api_key,
+                                               account=stripe_account)
         url = cls.class_url() + '/upcoming'
         response, api_key = requestor.request('get', url, params)
-        return convert_to_stripe_object(response, api_key)
+        return convert_to_stripe_object(response, api_key, stripe_account)
 
 
 class InvoiceItem(CreateableAPIResource, UpdateableAPIResource,
@@ -484,7 +620,8 @@ class Subscription(UpdateableAPIResource, DeletableAPIResource):
             "Use customer.subscriptions.retrieve('subscription_id') instead.")
 
     def delete_discount(self, **params):
-        requestor = api_requestor.APIRequestor(self.api_key)
+        requestor = api_requestor.APIRequestor(self.api_key,
+                                               account=self.stripe_account)
         url = self.instance_url() + '/discount'
         _, api_key = requestor.request('delete', url)
         self.refresh_from({'discount': None}, api_key, True)
@@ -528,6 +665,23 @@ class Transfer(CreateableAPIResource, UpdateableAPIResource,
                           self.instance_url() + '/cancel'))
 
 
+class Reversal(UpdateableAPIResource):
+
+    def instance_url(self):
+        self.id = util.utf8(self.id)
+        self.charge = util.utf8(self.transfer)
+        base = Transfer.class_url()
+        cust_extn = urllib.quote_plus(self.transfer)
+        extn = urllib.quote_plus(self.id)
+        return "%s/%s/reversals/%s" % (base, cust_extn, extn)
+
+    @classmethod
+    def retrieve(cls, id, api_key=None, **params):
+        raise NotImplementedError(
+            "Can't retrieve a reversal without a transfer"
+            "ID. Use transfer.reversals.retrieve('reversal_id')")
+
+
 class Recipient(CreateableAPIResource, UpdateableAPIResource,
                 ListableAPIResource, DeletableAPIResource):
 
@@ -537,14 +691,37 @@ class Recipient(CreateableAPIResource, UpdateableAPIResource,
         return transfers
 
 
+class FileUpload(ListableAPIResource):
+    @classmethod
+    def api_base(cls):
+        return upload_api_base
+
+    @classmethod
+    def class_name(cls):
+        return 'file'
+
+    @classmethod
+    def create(cls, api_key=None, stripe_account=None, **params):
+        requestor = api_requestor.APIRequestor(
+            api_key, api_base=cls.api_base(), account=stripe_account)
+        url = cls.class_url()
+        supplied_headers = {
+            "Content-Type": "multipart/form-data"
+        }
+        response, api_key = requestor.request(
+            'post', url, params=params, headers=supplied_headers)
+        return convert_to_stripe_object(response, api_key, stripe_account)
+
+
 class ApplicationFee(ListableAPIResource):
     @classmethod
     def class_name(cls):
         return 'application_fee'
 
-    def refund(self, **params):
+    def refund(self, idempotency_key=None, **params):
+        headers = populate_headers(idempotency_key)
         url = self.instance_url() + '/refund'
-        self.refresh_from(self.request('post', url, params))
+        self.refresh_from(self.request('post', url, params, headers))
         return self
 
 
@@ -563,3 +740,28 @@ class ApplicationFeeRefund(UpdateableAPIResource):
         raise NotImplementedError(
             "Can't retrieve a refund without an application fee ID. "
             "Use application_fee.refunds.retrieve('refund_id') instead.")
+
+
+class BitcoinReceiver(CreateableAPIResource, UpdateableAPIResource,
+                      DeletableAPIResource, ListableAPIResource):
+
+    def instance_url(self):
+        self.id = util.utf8(self.id)
+        extn = urllib.quote_plus(self.id)
+
+        if (hasattr(self, 'customer')):
+            self.customer = util.utf8(self.customer)
+            base = Customer.class_url()
+            cust_extn = urllib.quote_plus(self.customer)
+            return "%s/%s/sources/%s" % (base, cust_extn, extn)
+        else:
+            base = BitcoinReceiver.class_url()
+            return "%s/%s" % (base, extn)
+
+    @classmethod
+    def class_url(cls):
+        return '/v1/bitcoin/receivers'
+
+
+class BitcoinTransaction(StripeObject):
+    pass
