@@ -1,6 +1,101 @@
+=== 1.38.0 2016-09-15
+
+* Add support for Apple Pay domains
+
+=== 1.37.0 2016-07-12
+
+* Add `ThreeDSecure` model for 3-D secure payments
+
+=== 1.36.0 2016-06-29
+
+* Add `update` class method to resources that can be updated
+
+=== 1.35.0 2016-05-24
+
+* Add support for returning Relay orders
+
+=== 1.34.0 2016-05-20
+
+* Add support for Alipay accounts
+
+=== 1.33.0 2016-05-04
+
+* Add support for the new /v1/subscriptions endpoint
+  * stripe.Subscription.retrieve
+  * stripe.Subscription.update
+  * stripe.Subscription.create
+  * stripe.Subscription.list
+
+=== 1.32.2 2016-04-12
+
+* Fix bug where file uploads could not be properly listed
+
+=== 1.32.1 2016-04-11
+
+* Fix bug where request parameters were not passed between pages with `auto_paging_iter`
+
+=== 1.32.0 2016-03-31
+
+* Update CA cert bundle for compatibility with OpenSSL versions below 1.0.1
+
+=== 1.31.1 2016-03-24
+
+* Fix uploading of binary files in Python 3
+
+=== 1.31.0 2016-03-15
+
+* Add `reject` on `Account` to support the new API feature
+
+=== 1.30.0 2016-02-27
+
+* Add `CountrySpec` model for looking up country payment information
+
+=== 1.29.1 2016-02-01
+
+* Update bundled CA certs
+
+=== 1.29.0 2016-01-26
+
+* Add support for deleting Relay products and SKUs
+
+=== 1.28.0 2016-01-04
+
+* Add an automatic paginating iterator to lists available via `auto_paging_iter`
+* List objects are now iterable
+* Error messages set to `None` are now handled properly
+* The `all` method on list objects has been deprecated in favor of `list`
+* Calls to `instance_url` are now side effect free
+
+=== 1.27.1 2015-10-02
+
+* Official Python 3.4 & 3.5 compatibility
+* Add configurable HTTP client
+* Add ability to delete attributes
+
+=== 1.27.0 2015-09-14
+
+* Products, SKUs, Orders resources
+
+=== 1.26.0 2015-09-11
+
+* Add support for new 429 rate limit response
+
+=== 1.25.0 2015-08-17
+
+* Added refund listing, creation and retrieval
+
+=== 1.24.1 2015-08-05
+
+* Fix error handling for Python 2.6
+
+=== 1.24.0 2015-08-03
+
+* Managed accounts can now be deleted
+* Added dispute listing and retrieval
+
 === 1.23.0 2015-07-06
 
-* Include response headers in exceptions.
+* Include response headers in exceptions
 
 === 1.22.3 2015-06-04
 

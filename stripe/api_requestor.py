@@ -64,17 +64,14 @@ def _build_api_url(url, query):
 class APIRequestor(object):
 
     def __init__(self, key=None, client=None, api_base=None, account=None):
-        if api_base:
-            self.api_base = api_base
-        else:
-            self.api_base = stripe.api_base
+        self.api_base = api_base or stripe.api_base
         self.api_key = key
         self.stripe_account = account
 
-        from stripe import verify_ssl_certs
+        from stripe import verify_ssl_certs as verify
 
-        self._client = client or http_client.new_default_http_client(
-            verify_ssl_certs=verify_ssl_certs)
+        self._client = client or stripe.default_http_client or \
+            http_client.new_default_http_client(verify_ssl_certs=verify)
 
     @classmethod
     def api_url(cls, url=''):
@@ -150,7 +147,11 @@ class APIRequestor(object):
                 "was %d)" % (rbody, rcode),
                 rbody, rcode, resp)
 
-        if rcode in [400, 404]:
+        # Rate limits were previously coded as 400's with code 'rate_limit'
+        if rcode == 429 or (rcode == 400 and err.get('code') == 'rate_limit'):
+            raise error.RateLimitError(
+                err.get('message'), rbody, rcode, resp, rheaders)
+        elif rcode in [400, 404]:
             raise error.InvalidRequestError(
                 err.get('message'), err.get('param'),
                 rbody, rcode, resp, rheaders)
@@ -222,7 +223,7 @@ class APIRequestor(object):
                            ['uname', lambda: ' '.join(platform.uname())]]:
             try:
                 val = func()
-            except Exception, e:
+            except Exception as e:
                 val = "!! %s" % (e,)
             ua[attr] = val
 

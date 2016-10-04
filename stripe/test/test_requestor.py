@@ -2,7 +2,7 @@ import datetime
 import unittest2
 import urlparse
 
-from mock import Mock
+from mock import Mock, ANY
 
 import stripe
 
@@ -57,6 +57,7 @@ class APIHeaderMatcher(object):
 
 
 class QueryMatcher(object):
+
     def __init__(self, expected):
         self.expected = sorted(expected)
 
@@ -68,6 +69,7 @@ class QueryMatcher(object):
 
 
 class UrlMatcher(object):
+
     def __init__(self, expected):
         self.exp_parts = urlparse.urlsplit(expected)
 
@@ -291,8 +293,8 @@ class APIRequestorRequestTests(StripeUnitTestCase):
 
         body, used_key = requestor.request('get', self.valid_path, {})
 
-        self.check_call('get', headers=APIHeaderMatcher(key,
-                        request_method='get'), requestor=requestor)
+        self.check_call('get', headers=APIHeaderMatcher(
+            key, request_method='get'), requestor=requestor)
         self.assertEqual(key, used_key)
 
     def test_passes_api_version(self):
@@ -351,6 +353,23 @@ class APIRequestorRequestTests(StripeUnitTestCase):
                           self.requestor.request,
                           'get', self.valid_path, {})
 
+    def test_rate_limit_error(self):
+        self.mock_response('{"error": {}}', 429)
+
+        self.assertRaises(stripe.error.RateLimitError,
+                          self.requestor.request,
+                          'get', self.valid_path, {})
+
+    def test_old_rate_limit_error(self):
+        """
+        Tests legacy rate limit error pre-2015-09-18
+        """
+        self.mock_response('{"error": {"code":"rate_limit"}}', 400)
+
+        self.assertRaises(stripe.error.RateLimitError,
+                          self.requestor.request,
+                          'get', self.valid_path, {})
+
     def test_server_error(self):
         self.mock_response('{"error": {}}', 500)
 
@@ -369,6 +388,30 @@ class APIRequestorRequestTests(StripeUnitTestCase):
         self.assertRaises(stripe.error.APIConnectionError,
                           self.requestor.request,
                           'foo', 'bar')
+
+
+class DefaultClientTests(unittest2.TestCase):
+
+    def setUp(self):
+        stripe.default_http_client = None
+        stripe.api_key = 'foo'
+
+    def test_default_http_client_called(self):
+        hc = Mock(stripe.http_client.HTTPClient)
+        hc._verify_ssl_certs = True
+        hc.name = 'mockclient'
+        hc.request = Mock(return_value=("{}", 200, {}))
+
+        stripe.default_http_client = hc
+        stripe.Charge.list(limit=3)
+
+        hc.request.assert_called_with(
+            'get', 'https://api.stripe.com/v1/charges?limit=3', ANY, None)
+
+    def tearDown(self):
+        stripe.api_key = None
+        stripe.default_http_client = None
+
 
 if __name__ == '__main__':
     unittest2.main()

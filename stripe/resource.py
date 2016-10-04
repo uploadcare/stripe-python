@@ -6,18 +6,40 @@ from stripe import api_requestor, error, util, upload_api_base
 
 
 def convert_to_stripe_object(resp, api_key, account):
-    types = {'account': Account, 'charge': Charge, 'customer': Customer,
-             'invoice': Invoice, 'invoiceitem': InvoiceItem,
-             'plan': Plan, 'coupon': Coupon, 'token': Token, 'event': Event,
-             'transfer': Transfer, 'list': ListObject, 'recipient': Recipient,
-             'bank_account': BankAccount,
-             'card': Card, 'application_fee': ApplicationFee,
-             'subscription': Subscription, 'refund': Refund,
-             'file_upload': FileUpload,
-             'fee_refund': ApplicationFeeRefund,
-             'bitcoin_receiver': BitcoinReceiver,
-             'bitcoin_transaction': BitcoinTransaction,
-             'transfer_reversal': Reversal}
+    types = {
+        'account': Account,
+        'alipay_account': AlipayAccount,
+        'apple_pay_domain': ApplePayDomain,
+        'application_fee': ApplicationFee,
+        'bank_account': BankAccount,
+        'bitcoin_receiver': BitcoinReceiver,
+        'bitcoin_transaction': BitcoinTransaction,
+        'card': Card,
+        'charge': Charge,
+        'country_spec': CountrySpec,
+        'coupon': Coupon,
+        'customer': Customer,
+        'dispute': Dispute,
+        'event': Event,
+        'fee_refund': ApplicationFeeRefund,
+        'file_upload': FileUpload,
+        'invoice': Invoice,
+        'invoiceitem': InvoiceItem,
+        'list': ListObject,
+        'plan': Plan,
+        'recipient': Recipient,
+        'refund': Refund,
+        'subscription': Subscription,
+        'subscription_item': SubscriptionItem,
+        'three_d_secure': ThreeDSecure,
+        'token': Token,
+        'transfer': Transfer,
+        'transfer_reversal': Reversal,
+        'product': Product,
+        'sku': SKU,
+        'order': Order,
+        'order_return': OrderReturn
+    }
 
     if isinstance(resp, list):
         return [convert_to_stripe_object(i, api_key, account) for i in resp]
@@ -31,6 +53,16 @@ def convert_to_stripe_object(resp, api_key, account):
         return klass.construct_from(resp, api_key, stripe_account=account)
     else:
         return resp
+
+
+def convert_array_to_dict(arr):
+    if isinstance(arr, list):
+        d = {}
+        for i, value in enumerate(arr):
+            d[str(i)] = value
+        return d
+    else:
+        return arr
 
 
 def populate_headers(idempotency_key):
@@ -98,8 +130,14 @@ class StripeObject(dict):
 
         try:
             return self[k]
-        except KeyError, err:
+        except KeyError as err:
             raise AttributeError(*err.args)
+
+    def __delattr__(self, k):
+        if k[0] == '_' or k in self.__dict__:
+            return super(StripeObject, self).__delattr__(k)
+        else:
+            del self[k]
 
     def __setitem__(self, k, v):
         if v == "":
@@ -120,7 +158,7 @@ class StripeObject(dict):
     def __getitem__(self, k):
         try:
             return super(StripeObject, self).__getitem__(k)
-        except KeyError, err:
+        except KeyError as err:
             if k in self._transient_values:
                 raise KeyError(
                     "%r.  HINT: The %r attribute was set in the past."
@@ -133,9 +171,11 @@ class StripeObject(dict):
                 raise err
 
     def __delitem__(self, k):
-        raise TypeError(
-            "You cannot delete attributes on a StripeObject. "
-            "To unset a property, set it to None.")
+        super(StripeObject, self).__delitem__(k)
+
+        # Allows for unpickling in Python 3.x
+        if hasattr(self, '_unsaved_values'):
+            self._unsaved_values.remove(k)
 
     @classmethod
     def construct_from(cls, values, key, stripe_account=None):
@@ -288,8 +328,31 @@ class APIResource(StripeObject):
 
 class ListObject(StripeObject):
 
-    def all(self, **params):
+    def list(self, **params):
         return self.request('get', self['url'], params)
+
+    def all(self, **params):
+        warnings.warn("The `all` method is deprecated and will"
+                      "be removed in future versions. Please use the "
+                      "`list` method instead",
+                      DeprecationWarning)
+        return self.list(**params)
+
+    def auto_paging_iter(self):
+        page = self
+        params = dict(self._retrieve_params)
+
+        while True:
+            item_id = None
+            for item in page:
+                item_id = item.get('id', None)
+                yield item
+
+            if not getattr(page, 'has_more', False) or item_id is None:
+                return
+
+            params['starting_after'] = item_id
+            page = self.list(**params)
 
     def create(self, idempotency_key=None, **params):
         headers = populate_headers(idempotency_key)
@@ -302,6 +365,9 @@ class ListObject(StripeObject):
         url = "%s/%s" % (base, extn)
 
         return self.request('get', url, params)
+
+    def __iter__(self):
+        return getattr(self, 'data', []).__iter__()
 
 
 class SingletonAPIResource(APIResource):
@@ -325,12 +391,29 @@ class SingletonAPIResource(APIResource):
 class ListableAPIResource(APIResource):
 
     @classmethod
-    def all(cls, api_key=None, idempotency_key=None,
-            stripe_account=None, **params):
-        requestor = api_requestor.APIRequestor(api_key, account=stripe_account)
+    def all(cls, *args, **params):
+        warnings.warn("The `all` class method is deprecated and will"
+                      "be removed in future versions. Please use the "
+                      "`list` class method instead",
+                      DeprecationWarning)
+        return cls.list(*args, **params)
+
+    @classmethod
+    def auto_paging_iter(self, *args, **params):
+        return self.list(*args, **params).auto_paging_iter()
+
+    @classmethod
+    def list(cls, api_key=None, idempotency_key=None,
+             stripe_account=None, **params):
+        requestor = api_requestor.APIRequestor(api_key,
+                                               api_base=cls.api_base(),
+                                               account=stripe_account)
         url = cls.class_url()
         response, api_key = requestor.request('get', url, params)
-        return convert_to_stripe_object(response, api_key, stripe_account)
+        stripe_object = convert_to_stripe_object(response, api_key,
+                                                 stripe_account)
+        stripe_object._retrieve_params = params
+        return stripe_object
 
 
 class CreateableAPIResource(APIResource):
@@ -346,6 +429,19 @@ class CreateableAPIResource(APIResource):
 
 
 class UpdateableAPIResource(APIResource):
+
+    @classmethod
+    def _modify(cls, url, api_key=None, idempotency_key=None,
+                stripe_account=None, **params):
+        requestor = api_requestor.APIRequestor(api_key, account=stripe_account)
+        headers = populate_headers(idempotency_key)
+        response, api_key = requestor.request('post', url, params, headers)
+        return convert_to_stripe_object(response, api_key, stripe_account)
+
+    @classmethod
+    def modify(cls, sid, **params):
+        url = "%s/%s" % (cls.class_url(), urllib.quote_plus(util.utf8(sid)))
+        return cls._modify(url, **params)
 
     def save(self, idempotency_key=None):
         updated_params = self.serialize(None)
@@ -368,21 +464,68 @@ class DeletableAPIResource(APIResource):
 
 # API objects
 class Account(CreateableAPIResource, ListableAPIResource,
-              UpdateableAPIResource):
+              UpdateableAPIResource, DeletableAPIResource):
     @classmethod
     def retrieve(cls, id=None, api_key=None, **params):
         instance = cls(id, api_key, **params)
         instance.refresh()
         return instance
 
-    def instance_url(self):
-        id = self.get('id')
-        if not id:
+    @classmethod
+    def modify(cls, id=None, **params):
+        return cls._modify(cls._build_instance_url(id), **params)
+
+    @classmethod
+    def _build_instance_url(cls, sid):
+        if not sid:
             return "/v1/account"
-        id = util.utf8(id)
-        base = self.class_url()
-        extn = urllib.quote_plus(id)
+        sid = util.utf8(sid)
+        base = cls.class_url()
+        extn = urllib.quote_plus(sid)
         return "%s/%s" % (base, extn)
+
+    def instance_url(self):
+        return self._build_instance_url(self.get('id'))
+
+    def reject(self, reason=None, idempotency_key=None):
+        url = self.instance_url() + '/reject'
+        headers = populate_headers(idempotency_key)
+        if reason:
+            params = {"reason": reason}
+        else:
+            params = {}
+        self.refresh_from(
+            self.request('post', url, params, headers)
+        )
+        return self
+
+
+class AlipayAccount(UpdateableAPIResource, DeletableAPIResource):
+
+    @classmethod
+    def _build_instance_url(cls, customer, sid):
+        token = util.utf8(sid)
+        extn = urllib.quote_plus(token)
+        customer = util.utf8(customer)
+
+        base = Customer.class_url()
+        owner_extn = urllib.quote_plus(customer)
+
+        return "%s/%s/sources/%s" % (base, owner_extn, extn)
+
+    def instance_url(self):
+        return self._build_instance_url(self.customer, self.id)
+
+    @classmethod
+    def modify(cls, customer, id, **params):
+        url = cls._build_instance_url(customer, id)
+        return cls._modify(url, **params)
+
+    @classmethod
+    def retrieve(cls, id, api_key=None, stripe_account=None, **params):
+        raise NotImplementedError(
+            "Can't retrieve an Alipay account without a customer ID. "
+            "Use customer.sources.retrieve('alipay_account_id') instead.")
 
 
 class Balance(SingletonAPIResource):
@@ -399,8 +542,8 @@ class BalanceTransaction(ListableAPIResource):
 class Card(UpdateableAPIResource, DeletableAPIResource):
 
     def instance_url(self):
-        self.id = util.utf8(self.id)
-        extn = urllib.quote_plus(self.id)
+        token = util.utf8(self.id)
+        extn = urllib.quote_plus(token)
         if (hasattr(self, 'customer')):
             customer = util.utf8(self.customer)
 
@@ -426,9 +569,17 @@ class Card(UpdateableAPIResource, DeletableAPIResource):
             raise error.InvalidRequestError(
                 "Could not determine whether card_id %s is "
                 "attached to a customer, recipient, or "
-                "account." % self.id, 'id')
+                "account." % token, 'id')
 
         return "%s/%s/%s/%s" % (base, owner_extn, class_base, extn)
+
+    @classmethod
+    def modify(cls, sid, **params):
+        raise NotImplementedError(
+            "Can't modify a card without a customer, recipient or account "
+            "ID. Call save on customer.sources.retrieve('card_id'), "
+            "recipient.cards.retrieve('card_id'), or "
+            "account.external_accounts.retrieve('card_id') instead.")
 
     @classmethod
     def retrieve(cls, id, api_key=None, stripe_account=None, **params):
@@ -439,11 +590,20 @@ class Card(UpdateableAPIResource, DeletableAPIResource):
             "account.external_accounts.retrieve('card_id') instead.")
 
 
-class BankAccount(UpdateableAPIResource, DeletableAPIResource):
+class VerifyMixin(object):
+
+    def verify(self, idempotency_key=None, **params):
+        url = self.instance_url() + '/verify'
+        headers = populate_headers(idempotency_key)
+        self.refresh_from(self.request('post', url, params, headers))
+        return self
+
+
+class BankAccount(UpdateableAPIResource, DeletableAPIResource, VerifyMixin):
 
     def instance_url(self):
-        self.id = util.utf8(self.id)
-        extn = urllib.quote_plus(self.id)
+        token = util.utf8(self.id)
+        extn = urllib.quote_plus(token)
         if (hasattr(self, 'customer')):
             customer = util.utf8(self.customer)
 
@@ -461,9 +621,16 @@ class BankAccount(UpdateableAPIResource, DeletableAPIResource):
         else:
             raise error.InvalidRequestError(
                 "Could not determine whether bank_account_id %s is "
-                "attached to a customer or an account." % self.id, 'id')
+                "attached to a customer or an account." % token, 'id')
 
         return "%s/%s/%s/%s" % (base, owner_extn, class_base, extn)
+
+    @classmethod
+    def modify(cls, sid, **params):
+        raise NotImplementedError(
+            "Can't modify a bank account without a customer or account ID. "
+            "Call save on customer.sources.retrieve('bank_account_id') or "
+            "account.external_accounts.retrieve('bank_account_id') instead.")
 
     @classmethod
     def retrieve(cls, id, api_key=None, stripe_account=None, **params):
@@ -525,6 +692,16 @@ class Charge(CreateableAPIResource, ListableAPIResource,
         return self
 
 
+class Dispute(CreateableAPIResource, ListableAPIResource,
+              UpdateableAPIResource):
+
+    def close(self, idempotency_key=None):
+        url = self.instance_url() + '/close'
+        headers = populate_headers(idempotency_key)
+        self.refresh_from(self.request('post', url, {}, headers))
+        return self
+
+
 class Customer(CreateableAPIResource, UpdateableAPIResource,
                ListableAPIResource, DeletableAPIResource):
 
@@ -536,20 +713,25 @@ class Customer(CreateableAPIResource, UpdateableAPIResource,
 
     def invoices(self, **params):
         params['customer'] = self.id
-        invoices = Invoice.all(self.api_key, **params)
+        invoices = Invoice.list(self.api_key, **params)
         return invoices
 
     def invoice_items(self, **params):
         params['customer'] = self.id
-        iis = InvoiceItem.all(self.api_key, **params)
+        iis = InvoiceItem.list(self.api_key, **params)
         return iis
 
     def charges(self, **params):
         params['customer'] = self.id
-        charges = Charge.all(self.api_key, **params)
+        charges = Charge.list(self.api_key, **params)
         return charges
 
     def update_subscription(self, idempotency_key=None, **params):
+        warnings.warn(
+            'The `update_subscription` method is deprecated. Instead, use the '
+            '`subscriptions` resource on the customer object to update a '
+            'subscription',
+            DeprecationWarning)
         requestor = api_requestor.APIRequestor(self.api_key,
                                                account=self.stripe_account)
         url = self.instance_url() + '/subscription'
@@ -559,6 +741,11 @@ class Customer(CreateableAPIResource, UpdateableAPIResource,
         return self.subscription
 
     def cancel_subscription(self, idempotency_key=None, **params):
+        warnings.warn(
+            'The `cancel_subscription` method is deprecated. Instead, use the '
+            '`subscriptions` resource on the customer object to cancel a '
+            'subscription',
+            DeprecationWarning)
         requestor = api_requestor.APIRequestor(self.api_key,
                                                account=self.stripe_account)
         url = self.instance_url() + '/subscription'
@@ -601,23 +788,8 @@ class Plan(CreateableAPIResource, DeletableAPIResource,
     pass
 
 
-class Subscription(UpdateableAPIResource, DeletableAPIResource):
-
-    def instance_url(self):
-        self.id = util.utf8(self.id)
-        self.customer = util.utf8(self.customer)
-
-        base = Customer.class_url()
-        cust_extn = urllib.quote_plus(self.customer)
-        extn = urllib.quote_plus(self.id)
-
-        return "%s/%s/subscriptions/%s" % (base, cust_extn, extn)
-
-    @classmethod
-    def retrieve(cls, id, api_key=None, **params):
-        raise NotImplementedError(
-            "Can't retrieve a subscription without a customer ID. "
-            "Use customer.subscriptions.retrieve('subscription_id') instead.")
+class Subscription(CreateableAPIResource, DeletableAPIResource,
+                   UpdateableAPIResource, ListableAPIResource):
 
     def delete_discount(self, **params):
         requestor = api_requestor.APIRequestor(self.api_key,
@@ -626,22 +798,29 @@ class Subscription(UpdateableAPIResource, DeletableAPIResource):
         _, api_key = requestor.request('delete', url)
         self.refresh_from({'discount': None}, api_key, True)
 
-
-class Refund(UpdateableAPIResource):
-
-    def instance_url(self):
-        self.id = util.utf8(self.id)
-        self.charge = util.utf8(self.charge)
-        base = Charge.class_url()
-        cust_extn = urllib.quote_plus(self.charge)
-        extn = urllib.quote_plus(self.id)
-        return "%s/%s/refunds/%s" % (base, cust_extn, extn)
+    @classmethod
+    def modify(cls, sid, **params):
+        if "items" in params:
+            params["items"] = convert_array_to_dict(params["items"])
+        super(Subscription, cls).modify(sid, **params)
 
     @classmethod
-    def retrieve(cls, id, api_key=None, **params):
-        raise NotImplementedError(
-            "Can't retrieve a refund without a charge ID. "
-            "Use charge.refunds.retrieve('refund_id') instead.")
+    def create(cls, **params):
+        if "items" in params:
+            params["items"] = convert_array_to_dict(params["items"])
+        super(Subscription, cls).create(**params)
+
+
+class SubscriptionItem(CreateableAPIResource, DeletableAPIResource,
+                       UpdateableAPIResource, ListableAPIResource):
+    @classmethod
+    def class_name(cls):
+        return 'subscription_item'
+
+
+class Refund(CreateableAPIResource, ListableAPIResource,
+             UpdateableAPIResource):
+    pass
 
 
 class Token(CreateableAPIResource):
@@ -668,12 +847,18 @@ class Transfer(CreateableAPIResource, UpdateableAPIResource,
 class Reversal(UpdateableAPIResource):
 
     def instance_url(self):
-        self.id = util.utf8(self.id)
-        self.charge = util.utf8(self.transfer)
+        token = util.utf8(self.id)
+        transfer = util.utf8(self.transfer)
         base = Transfer.class_url()
-        cust_extn = urllib.quote_plus(self.transfer)
-        extn = urllib.quote_plus(self.id)
+        cust_extn = urllib.quote_plus(transfer)
+        extn = urllib.quote_plus(token)
         return "%s/%s/reversals/%s" % (base, cust_extn, extn)
+
+    @classmethod
+    def modify(cls, sid, **params):
+        raise NotImplementedError(
+            "Can't modify a reversal without a transfer"
+            "ID. Call save on transfer.reversals.retrieve('reversal_id')")
 
     @classmethod
     def retrieve(cls, id, api_key=None, **params):
@@ -687,7 +872,7 @@ class Recipient(CreateableAPIResource, UpdateableAPIResource,
 
     def transfers(self, **params):
         params['recipient'] = self.id
-        transfers = Transfer.all(self.api_key, **params)
+        transfers = Transfer.list(self.api_key, **params)
         return transfers
 
 
@@ -727,13 +912,22 @@ class ApplicationFee(ListableAPIResource):
 
 class ApplicationFeeRefund(UpdateableAPIResource):
 
-    def instance_url(self):
-        self.id = util.utf8(self.id)
-        self.fee = util.utf8(self.fee)
+    @classmethod
+    def _build_instance_url(cls, fee, sid):
+        fee = util.utf8(fee)
+        sid = util.utf8(sid)
         base = ApplicationFee.class_url()
-        cust_extn = urllib.quote_plus(self.fee)
-        extn = urllib.quote_plus(self.id)
+        cust_extn = urllib.quote_plus(fee)
+        extn = urllib.quote_plus(sid)
         return "%s/%s/refunds/%s" % (base, cust_extn, extn)
+
+    @classmethod
+    def modify(cls, fee, sid, **params):
+        url = cls._build_instance_url(fee, sid)
+        return cls._modify(url, **params)
+
+    def instance_url(self):
+        return self._build_instance_url(self.fee, self.id)
 
     @classmethod
     def retrieve(cls, id, api_key=None, **params):
@@ -746,13 +940,13 @@ class BitcoinReceiver(CreateableAPIResource, UpdateableAPIResource,
                       DeletableAPIResource, ListableAPIResource):
 
     def instance_url(self):
-        self.id = util.utf8(self.id)
-        extn = urllib.quote_plus(self.id)
+        token = util.utf8(self.id)
+        extn = urllib.quote_plus(token)
 
         if (hasattr(self, 'customer')):
-            self.customer = util.utf8(self.customer)
+            customer = util.utf8(self.customer)
             base = Customer.class_url()
-            cust_extn = urllib.quote_plus(self.customer)
+            cust_extn = urllib.quote_plus(customer)
             return "%s/%s/sources/%s" % (base, cust_extn, extn)
         else:
             base = BitcoinReceiver.class_url()
@@ -765,3 +959,57 @@ class BitcoinReceiver(CreateableAPIResource, UpdateableAPIResource,
 
 class BitcoinTransaction(StripeObject):
     pass
+
+
+class Product(CreateableAPIResource, UpdateableAPIResource,
+              ListableAPIResource, DeletableAPIResource):
+    pass
+
+
+class SKU(CreateableAPIResource, UpdateableAPIResource,
+          ListableAPIResource, DeletableAPIResource):
+    pass
+
+
+class Order(CreateableAPIResource, UpdateableAPIResource,
+            ListableAPIResource):
+    def pay(self, idempotency_key=None, **params):
+        headers = populate_headers(idempotency_key)
+        return self.request(
+            'post', self.instance_url() + '/pay', params, headers)
+
+    def return_order(self, idempotency_key=None, **params):
+        headers = populate_headers(idempotency_key)
+        return self.request(
+            'post', self.instance_url() + '/returns', params, headers)
+
+
+class OrderReturn(ListableAPIResource):
+    pass
+
+    @classmethod
+    def class_url(cls):
+        return '/v1/order_returns'
+
+
+class CountrySpec(ListableAPIResource):
+    @classmethod
+    def class_name(cls):
+        return 'country_spec'
+
+
+class ThreeDSecure(CreateableAPIResource):
+    @classmethod
+    def class_url(cls):
+        return '/v1/3d_secure'
+
+    @classmethod
+    def retrieve(cls, id, api_key=None, stripe_account=None, **params):
+        raise NotImplementedError("Can't retrieve 3D Secure objects.")
+
+
+class ApplePayDomain(CreateableAPIResource, ListableAPIResource,
+                     DeletableAPIResource):
+    @classmethod
+    def class_url(cls):
+        return '/v1/apple_pay/domains'

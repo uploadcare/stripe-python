@@ -96,13 +96,13 @@ class RequestsClient(HTTPClient):
 
         try:
             try:
-                result = requests_session.request(method,
-                                                  url,
-                                                  headers=headers,
-                                                  data=post_data,
-                                                  timeout=80,
-                                                  **kwargs)
-            except TypeError, e:
+                result = requests.request(method,
+                                          url,
+                                          headers=headers,
+                                          data=post_data,
+                                          timeout=80,
+                                          **kwargs)
+            except TypeError as e:
                 raise TypeError(
                     'Warning: It looks like your installed version of the '
                     '"requests" library is not compatible with Stripe\'s '
@@ -116,7 +116,7 @@ class RequestsClient(HTTPClient):
             # are susceptible to the same and should be updated.
             content = result.content
             status_code = result.status_code
-        except Exception, e:
+        except Exception as e:
             # Would catch just requests.exceptions.RequestException, but can
             # also raise ValueError, RuntimeError, etc.
             self._handle_request_error(e)
@@ -145,6 +145,12 @@ class RequestsClient(HTTPClient):
 class UrlFetchClient(HTTPClient):
     name = 'urlfetch'
 
+    def __init__(self, verify_ssl_certs=True, deadline=55):
+        self._verify_ssl_certs = verify_ssl_certs
+        # GAE requests time out after 60 seconds, so make sure to default
+        # to 55 seconds to allow for a slow Stripe
+        self._deadline = deadline
+
     def request(self, method, url, headers, post_data=None):
         try:
             result = urlfetch.fetch(
@@ -155,12 +161,10 @@ class UrlFetchClient(HTTPClient):
                 # However, that's ok because the CA bundle they use recognizes
                 # api.stripe.com.
                 validate_certificate=self._verify_ssl_certs,
-                # GAE requests time out after 60 seconds, so make sure we leave
-                # some time for the application to handle a slow Stripe
-                deadline=55,
+                deadline=self._deadline,
                 payload=post_data
             )
-        except urlfetch.Error, e:
+        except urlfetch.Error as e:
             self._handle_request_error(e, url)
 
         return result.content, result.status_code, result.headers
@@ -226,7 +230,7 @@ class PycurlClient(HTTPClient):
 
         try:
             curl.perform()
-        except pycurl.error, e:
+        except pycurl.error as e:
             self._handle_request_error(e)
         rbody = s.getvalue()
         rcode = curl.getinfo(pycurl.RESPONSE_CODE)
@@ -276,11 +280,11 @@ class Urllib2Client(HTTPClient):
             rbody = response.read()
             rcode = response.code
             headers = dict(response.info())
-        except urllib2.HTTPError, e:
+        except urllib2.HTTPError as e:
             rcode = e.code
             rbody = e.read()
             headers = dict(e.info())
-        except (urllib2.URLError, ValueError), e:
+        except (urllib2.URLError, ValueError) as e:
             self._handle_request_error(e)
         lh = dict((k.lower(), v) for k, v in dict(headers).iteritems())
         return rbody, rcode, lh
