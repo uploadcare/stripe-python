@@ -143,6 +143,7 @@ class SessionRequestsClientTests(StripeUnitTestCase, ClientTestBase):
         result.status_code = code
         mock.session = Mock()
         mock.session.return_value = Mock()
+
         mock.session.return_value.request = Mock(return_value=result)
 
     def mock_error(self, mock):
@@ -154,7 +155,8 @@ class SessionRequestsClientTests(StripeUnitTestCase, ClientTestBase):
         mock.session.return_value.request.side_effect = mock.exceptions.RequestException()
 
     def check_call(self, mock, meth, url, post_data, headers):
-        mock.session.return_value.request.assert_called_with(meth, url,
+        mock.session.return_value.request.assert_called_with(
+            meth, url,
             headers=headers,
             data=post_data,
             verify=RequestsVerify(),
