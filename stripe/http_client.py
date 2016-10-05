@@ -4,6 +4,7 @@ import textwrap
 import warnings
 import email
 
+import stripe
 from stripe import error, util
 
 
@@ -23,7 +24,6 @@ except ImportError:
 
 try:
     import requests
-    requests_session = requests.session()
 except ImportError:
     requests = None
 else:
@@ -85,6 +85,14 @@ class HTTPClient(object):
 class RequestsClient(HTTPClient):
     name = 'requests'
 
+    def __init__(self, verify_ssl_certs=True):
+        super(RequestsClient, self).__init__(verify_ssl_certs)
+        if getattr(stripe, 'use_session', False):
+            self.session = requests.session()
+            self._request = self.session.request
+        else:
+            self._request = requests.request
+
     def request(self, method, url, headers, post_data=None):
         kwargs = {}
 
@@ -96,12 +104,12 @@ class RequestsClient(HTTPClient):
 
         try:
             try:
-                result = requests.request(method,
-                                          url,
-                                          headers=headers,
-                                          data=post_data,
-                                          timeout=80,
-                                          **kwargs)
+                result = self._request(method,
+                                       url,
+                                       headers=headers,
+                                       data=post_data,
+                                       timeout=80,
+                                       **kwargs)
             except TypeError as e:
                 raise TypeError(
                     'Warning: It looks like your installed version of the '

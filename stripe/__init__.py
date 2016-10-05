@@ -13,6 +13,7 @@ upload_api_base = 'https://uploads.stripe.com'
 api_version = None
 verify_ssl_certs = True
 default_http_client = None
+use_session = False
 
 # Resource
 from stripe.resource import (  # noqa

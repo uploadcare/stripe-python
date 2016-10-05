@@ -109,6 +109,7 @@ class RequestsVerify(object):
         return other and other.endswith('stripe/data/ca-certificates.crt')
 
 
+@unittest2.skipIf(getattr(stripe, 'use_session', False), 'using session')
 class RequestsClientTests(StripeUnitTestCase, ClientTestBase):
     request_client = stripe.http_client.RequestsClient
 
@@ -129,6 +130,35 @@ class RequestsClientTests(StripeUnitTestCase, ClientTestBase):
                                         data=post_data,
                                         verify=RequestsVerify(),
                                         timeout=80)
+
+
+@unittest2.skipIf(not getattr(stripe, 'use_session', False),
+                  'not using session')
+class SessionRequestsClientTests(StripeUnitTestCase, ClientTestBase):
+    request_client = stripe.http_client.RequestsClient
+
+    def mock_response(self, mock, body, code):
+        result = Mock()
+        result.content = body
+        result.status_code = code
+        mock.session = Mock()
+        mock.session.return_value = Mock()
+        mock.session.return_value.request = Mock(return_value=result)
+
+    def mock_error(self, mock):
+        mock.exceptions.RequestException = Exception
+
+        mock.session = Mock()
+        mock.session.return_value = Mock()
+        mock.session.return_value.request = Mock()
+        mock.session.return_value.request.side_effect = mock.exceptions.RequestException()
+
+    def check_call(self, mock, meth, url, post_data, headers):
+        mock.session.return_value.request.assert_called_with(meth, url,
+            headers=headers,
+            data=post_data,
+            verify=RequestsVerify(),
+            timeout=80)
 
 
 class UrlFetchClientTests(StripeUnitTestCase, ClientTestBase):
