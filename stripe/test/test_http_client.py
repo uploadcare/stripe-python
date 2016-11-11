@@ -109,7 +109,6 @@ class RequestsVerify(object):
         return other and other.endswith('stripe/data/ca-certificates.crt')
 
 
-@unittest2.skipIf(getattr(stripe, 'use_session', False), 'using session')
 class RequestsClientTests(StripeUnitTestCase, ClientTestBase):
     request_client = stripe.http_client.RequestsClient
 
@@ -132,18 +131,25 @@ class RequestsClientTests(StripeUnitTestCase, ClientTestBase):
                                         timeout=80)
 
 
-@unittest2.skipIf(not getattr(stripe, 'use_session', False),
-                  'not using session')
-class SessionRequestsClientTests(StripeUnitTestCase, ClientTestBase):
-    request_client = stripe.http_client.RequestsClient
+class SessionRequestsClientTests(RequestsClientTests):
+
+    def setUp(self):
+        super(SessionRequestsClientTests, self).setUp()
+        self.session_patch = patch('stripe.http_client.stripe.use_session',
+                                   True)
+        self.session_patch.start()
+
+    def tearDown(self):
+        super(SessionRequestsClientTests, self).tearDown()
+        self.session_patch.stop()
 
     def mock_response(self, mock, body, code):
         result = Mock()
         result.content = body
         result.status_code = code
+
         mock.session = Mock()
         mock.session.return_value = Mock()
-
         mock.session.return_value.request = Mock(return_value=result)
 
     def mock_error(self, mock):
@@ -152,8 +158,8 @@ class SessionRequestsClientTests(StripeUnitTestCase, ClientTestBase):
         mock.session = Mock()
         mock.session.return_value = Mock()
         mock.session.return_value.request = Mock()
-        mock.session.return_value.request.side_effect = \
-            mock.exceptions.RequestException()
+        mock.session.return_value.request.side_effect = (
+            mock.exceptions.RequestException())
 
     def check_call(self, mock, meth, url, post_data, headers):
         mock.session.return_value.request.assert_called_with(
