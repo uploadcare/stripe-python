@@ -88,8 +88,7 @@ class RequestsClient(HTTPClient):
     def __init__(self, verify_ssl_certs=True):
         super(RequestsClient, self).__init__(verify_ssl_certs)
         if getattr(stripe, 'use_session', False):
-            self.session = requests.session()
-            self._request = self.session.request
+            self._request = requests.session().request
         else:
             self._request = requests.request
 
